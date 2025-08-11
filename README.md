@@ -52,7 +52,7 @@ Designed to handle **multiple server instances** with synchronized room state, e
   "type": "join",
   "roomId": "general-chat",
   "username": "John Doe",
-  "roomName": "General Discussion" // Optional
+  "roomName": "General Discussion" 
 }
 ```
 
@@ -117,7 +117,6 @@ ws://localhost:8080/ ) can be changed by VITE_SOCKET_URL environment varible on 
 
 * Spin up multiple WebSocket server instances on different ports or machines.
 * Redis Pub/Sub keeps all servers in sync so users in the same room see each other’s messages, regardless of which server they’re connected to.
-* This approach works both locally and in cloud deployments.
 
 
 
