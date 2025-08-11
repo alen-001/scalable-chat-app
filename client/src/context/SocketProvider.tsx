@@ -11,14 +11,14 @@ interface SocketContextProviderProps {
 }
 
 const SocketContext = createContext<SocketContextType | null>(null);
-
+const SOCKET_URL=import.meta.env.VITE_SOCKET_URL;
 export const SocketContextProvider: React.FC<SocketContextProviderProps> = ({ children }) => {
     const [socket, setSocket] = useState<WebSocket | undefined>();
     const [isConnected, setIsConnected] = useState(false);
 
     useEffect(() => {
-        const ws = new WebSocket('ws://localhost:8080');
-        
+        const ws = new WebSocket(SOCKET_URL || 'ws://localhost:8080');
+
         ws.onopen = () => {
             setIsConnected(true);
             console.log('Connected to WebSocket server');
