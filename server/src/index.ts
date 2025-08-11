@@ -1,118 +1,150 @@
-import { WebSocketServer,WebSocket } from "ws";
-const wss=new WebSocketServer({port: 8080},()=>{
-    console.log(`Websocket server started on port ${8080} `)
+import { WebSocketServer, WebSocket } from "ws";
+import { RedisService } from "./utils/redisService";
+import { RoomManager } from "./utils/roomHelper";
+import {
+  JoinRoomMessage,
+  ChatMessage,
+  LeaveRoomMessage,
+  GetRoomListMessage,
+  ServerMessage,
+} from "./types/messages";
+
+const PORT = parseInt(process.env.PORT || "8080");
+const wss = new WebSocketServer({ port: PORT }, () => {
+  console.log(`WebSocket server listening on ${PORT}`);
 });
-const rooms=new Map<string,{
-    name:string,
-    users:Map<string,{socket:WebSocket,username:string}>,
-    createdAt:Date
-}>();
-function generateUserId(){
-    return Math.random().toString(36).substring(2,15);
+
+const redisService = new RedisService();
+const roomManager = new RoomManager(redisService);
+
+function generateId() {
+  return Math.random().toString(36).slice(2, 12);
 }
-wss.on("connection",(socket:WebSocket)=>{
-    let userId:string| undefined;
-    let currentRoomId:string|null=null;
-    console.log("user connected - waiting to join room...");
-    socket.send("Hey! Please join or create a room");
-    socket.on("message",(e)=>{
-        try{
-            const message=JSON.parse(e.toString());
-            switch(message.type){
-                case "join":
-                    const {roomId,username}=message;
-                    userId=message.userId || generateUserId() || '';
-                    if(!rooms.has(roomId)){
-                        rooms.set(roomId,{
-                            name:roomId,
-                            users:new Map(),
-                            createdAt:new Date()
-                        })
-                        console.log(`Room with id: ${roomId} created`);
-                    }
-                    const room=rooms.get(roomId);
-                    if(userId && room) {
-                        room.users.set(userId,{socket,username});
-                        currentRoomId=roomId;
-                        console.log(`User ${username} joined room ${roomId}`);
-                    }
-                    socket.send(JSON.stringify({
-                        message:`Hey! ${username}! Welcome to room - ${roomId}`,
-                        memberCount:room?.users.size
-                    }));
-                    broadcastToRoom(roomId,{
-                        type:"userJoined",
-                        username,
-                        userId,
-                        memberCount:room?.users.size
-                    },userId);
-                    break;
-                case "message":
-                    if(currentRoomId && userId){
-                        const room=rooms.get(currentRoomId);
-                        const user=room?.users.get(userId);
-                        if(room && user){
-                            broadcastToRoom(currentRoomId,{
-                                type:"message",
-                                content:message.content,
-                                username:user.username,
-                                userId,
-                                timestamp:new Date().toISOString()
-                            });
-                        }
-                    }else{
-                        socket.send(JSON.stringify({
-                            type:"error",
-                            message:"You must join a room first"
-                        }));
-                    }
-                    break;
-                case "leaveRoom":
-                    if(currentRoomId && roomId && userId){
-                        leaveRoom(userId,currentRoomId)
-                        currentRoomId=null;
-                        userId=undefined;
-                    }
-                    break;
-            }
-        }catch(err){
-            console.log("Invalid message format or some other error",err);
-        }
-        socket.on("close",()=>{
-            if(currentRoomId && userId){
-                leaveRoom(userId,currentRoomId);
-            }
-        })
-    });
-})
-function broadcastToRoom(roomId:string,message:any,excludeUserId?:string){
-    const room=rooms.get(roomId);
-    if(room){
-        room.users.forEach((user,userId)=>{
-            if(userId !=excludeUserId && user.socket.readyState==WebSocket.OPEN){
-                user.socket.send(JSON.stringify(message));
-            }
-        })
+
+wss.on("connection", (socket: WebSocket) => {
+  const userId = generateId();
+
+  const connected: ServerMessage = {
+    type: "connected",
+    message: "Connected",
+    userId,
+  };
+  socket.send(JSON.stringify(connected));
+
+  socket.on("message", async (raw) => {
+    let parsed: any;
+    try {
+      parsed = JSON.parse(raw.toString());
+    } catch {
+      socket.send(
+        JSON.stringify({ type: "error", message: "Invalid JSON format" })
+      );
+      return;
     }
-}
-function leaveRoom(userId:string,currentRoomId:string){
-    const room=rooms.get(currentRoomId);
-    if(room && room.users.has(userId)){
-        var user=room.users.get(userId)!;
-        room.users.delete(userId);
-        console.log(`User ${user.username} left the room ${currentRoomId}`)
-        
-        if(room.users.size==0){
-            rooms.delete(currentRoomId);
-        }else{
-            broadcastToRoom(currentRoomId,{
-                type:"userLeft",
-                username:user.username,
-                userId,
-                memeberCount:room.users.size
+
+    switch (parsed.type as string) {
+      case "join": {
+        const { roomId, username, roomName } = parsed as JoinRoomMessage;
+        if (!roomId || !username) {
+          socket.send(
+            JSON.stringify({ type: "error", message: "roomId & username required" })
+          );
+          return;
+        }
+        try {
+          const memberCount = await roomManager.joinRoom(
+            userId,
+            roomId,
+            username,
+            socket,
+            roomName
+          );
+          socket.send(
+            JSON.stringify({
+              type: "roomJoined",
+              roomId,
+              memberCount,
+              message: `Joined room ${roomId}`,
             })
+          );
+          await roomManager.publishToRoom(roomId, {
+            type: "userJoined",
+            username,
+            userId,
+            memberCount,
+          }, userId);
+        } catch (e) {
+          socket.send(
+            JSON.stringify({ type: "error", message: "Join failed" })
+          );
         }
+        break;
+      }
+
+      case "message": {
+        const { content } = parsed as ChatMessage;
+        const user = roomManager.getLocalUser(userId);
+        if (!user || !user.roomId) {
+          socket.send(
+            JSON.stringify({ type: "error", message: "Join a room first" })
+          );
+          return;
+        }
+        const outgoing = {
+            type: "message",
+            content,
+            username: user.username,
+            userId,
+            timestamp: new Date().toISOString(),
+        };
+        // Echo to sender immediately
+        socket.send(JSON.stringify(outgoing));
+        await roomManager.publishToRoom(user.roomId, outgoing, userId);
+        break;
+      }
+
+      case "leaveRoom": {
+        const res = await roomManager.leaveRoom(userId);
+        if (res) {
+          await roomManager.publishToRoom(res.roomId, {
+            type: "userLeft",
+            username: res.username,
+            userId,
+            memberCount: res.memberCount,
+          }, userId);
+        }
+        break;
+      }
+
+      case "getRoomList": {
+        const rooms = await roomManager.getRoomList();
+        socket.send(
+          JSON.stringify({
+            type: "roomList",
+            rooms,
+          })
+        );
+        break;
+      }
+
+      default:
+        socket.send(
+          JSON.stringify({ type: "error", message: "Unknown message type" })
+        );
     }
-}
+  });
+
+  socket.on("close", async () => {
+    await roomManager.handleDisconnection(socket);
+  });
+
+  socket.on("error", () => {
+  });
+});
+
+process.on("SIGINT", () => {
+  console.log("Shutting down...");
+  wss.close(() => process.exit(0));
+});
 
 
